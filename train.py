@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data import StockGraph
-from model import FinSIRModel, BaselineModel
+from model import *
 
 
 def set_seed(seed):
@@ -180,11 +180,12 @@ if __name__ == '__main__':
     argparser.add_argument('--corr-graph-thresh', type=float, default=0.9, help='threshold for correlation graph') 
     argparser.add_argument('--add-self-loop', action='store_true', help='add self-loop to relational graphs')
     
-    argparser.add_argument('--model', type=str, default='FinSIR', help='model name', choices=['FinSIR', 'Baseline']) 
+    argparser.add_argument('--model', type=str, default='FinSIR', help='model name', choices=['Gated', 'FinSIR', 'Recurrent', 'Simple', 'Baseline']) 
     argparser.add_argument('--nhidden', type=int, default=16, help='number of hidden units')
     argparser.add_argument('--recurrent-layers', type=int, default=1, help='number of layers for recurrent message function')
     argparser.add_argument('--recurrent-dropout', type=float, default=0, help='dropout rate for recurrent message function')
     argparser.add_argument('--relational-agg', type=str, default='sum', help='aggregation type for relational convolution', choices=['sum', 'max', 'mean', 'sym'])
+    argparser.add_argument('--relational-dropout', type=float, default=0, help='dropout rate for relational convolution')
     argparser.add_argument('--readout-layers', type=int, default=1, help='number of layers for readout function')
     argparser.add_argument('--readout-dropout', type=float, default=0, help='dropout rate for readout function')
     
@@ -224,9 +225,9 @@ if __name__ == '__main__':
         correlation_dim = len(args.corr_graph_periods) + 1
         
         # Load model
-        Model = {'FinSIR': FinSIRModel, 'Baseline': BaselineModel}
+        Model = {'Gated': GatedFinSIRModel, 'FinSIR': FinSIRModel, 'Recurrent': RecurrentFinSIRModel, 'Simple': SimpleFinSIRModel, 'Baseline': BaselineModel}
         model = Model[args.model](input_dim, wiki_dim, industry_dim, correlation_dim, args.nhidden, 1, 
-                                  args.recurrent_layers, args.recurrent_dropout, args.relational_agg, 
+                                  args.recurrent_layers, args.recurrent_dropout, args.relational_agg, args.relational_dropout,
                                   args.readout_layers, args.readout_dropout).to(device)
         summary(model)
 

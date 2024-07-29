@@ -1,5 +1,6 @@
 dgl==2.1.0+cu121
 dglgo==0.0.1
 numpy==1.26.4
+ray==2.32.0
 torch==2.2.1
 torchinfo==1.8.0
