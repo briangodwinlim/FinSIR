@@ -36,16 +36,18 @@ class SIREConv(nn.Module):
         self.linear_query = nn.Linear(input_dim, hidden_dim, bias=bias)
         self.linear_key = nn.Linear(input_dim, hidden_dim, bias=bias)
         self.linear_edge = nn.Linear(edge_dim, hidden_dim, bias=bias)
-        self.linear_relation = nn.Linear(hidden_dim, output_dim, bias=bias)
+        self.linear_relation = nn.Linear(hidden_dim, (1 + int(agg_type == 'gated')) * output_dim, bias=bias)
 
         self._agg_type = agg_type
-        self._agg_func = fn.sum if agg_type == 'sym' else getattr(fn, agg_type)
+        self._agg_func = fn.sum if agg_type in ['sym', 'gated'] else getattr(fn, agg_type)
     
     def message_func(self, edges):
         if self._agg_type in ['sum', 'mean', 'sym']:
             return {'m': edges.src['norm'] * edges.dst['norm'] * self.activation(edges.dst['eq'] + edges.src['ek'] + edges.data['e'])}
-        else:
+        elif self._agg_type in ['max', 'min']:
             return {'m': self.linear_relation(self.activation(edges.dst['eq'] + edges.src['ek'] + edges.data['e']))}
+        elif self._agg_type == 'gated':
+            return {'m': F.glu(self.linear_relation(self.activation(edges.dst['eq'] + edges.src['ek'] + edges.data['e'])))}
     
     def forward(self, graph, nfeat, efeat):
         with graph.local_scope():
@@ -67,18 +69,17 @@ class SIREConv(nn.Module):
 
 
 class SIREConvBase(nn.Module):
-    def __init__(self, message_func, agg_type='sum', message_gate=False):
+    def __init__(self, message_func, agg_type='sum'):
         super(SIREConvBase, self).__init__()
         self._agg_type = agg_type
         self._message_func = message_func
-        self._message_gate = message_gate
-        self._agg_func = fn.sum if agg_type == 'sym' else getattr(fn, agg_type)
+        self._agg_func = fn.sum if agg_type in ['sym', 'gated'] else getattr(fn, agg_type)
     
     def message_func(self, edges):
-        message = torch.cat([edges.dst['eq'], edges.src['ek']], dim=-1) # Concatenate node features
-        message = message + edges.data['e'].unsqueeze(dim=-2)           # Add edge embedding
-        message = self._message_func(message)                           # Recurrent message function
-        message = F.glu(message) if self._message_gate else message     # Gating before aggregation
+        message = torch.cat([edges.dst['eq'], edges.src['ek']], dim=-1)     # Concatenate node features
+        message = message + edges.data['e'].unsqueeze(dim=-2)               # Add edge embedding
+        message = self._message_func(message)                               # Recurrent message function
+        message = F.glu(message) if self._agg_type == 'gated' else message  # Gating before aggregation
         return {'m': edges.src['norm'] * edges.dst['norm'] * message}
         
     def forward(self, graph, nfeat, efeat):
@@ -122,42 +123,18 @@ class TemporalAttention(nn.Module):
         return attn_feats
 
 
-class GatedFinSIRModel(nn.Module):
-    def __init__(self, input_dim, wiki_dim, industry_dim, correlation_dim, hidden_dim, output_dim, 
-                 recurrent_layers, recurrent_dropout, relational_agg, relational_dropout, readout_layers, readout_dropout):
-        super(GatedFinSIRModel, self).__init__()
-        self.wiki_encoder = nn.Linear(wiki_dim, 2 * input_dim, bias=False)
-        self.wiki_message = SIREConvBase(MessageFunction(2 * input_dim, 2 * hidden_dim, recurrent_layers, recurrent_dropout), relational_agg, True)
-        self.industry_encoder = nn.Linear(industry_dim, 2 * input_dim, bias=False)
-        self.industry_message = SIREConvBase(MessageFunction(2 * input_dim, 2 * hidden_dim, recurrent_layers, recurrent_dropout), relational_agg, True)
-        self.correlation_encoder = nn.Linear(correlation_dim, 2 * input_dim, bias=False)
-        self.correlation_message = SIREConvBase(MessageFunction(2 * input_dim, 2 * hidden_dim, recurrent_layers, recurrent_dropout), relational_agg, True)
-        self.temporal_attn = TemporalAttention(3 * hidden_dim)
-        self.readout = MLP(3 * hidden_dim, hidden_dim, output_dim, readout_layers, readout_dropout, nn.LeakyReLU(0.2, inplace=True))
-        
-    def forward(self, wiki_graph, industry_graph, correlation_graph, stock_features):
-        stock_features = stock_features / torch.mean(stock_features, dim=1, keepdim=True)
-        wiki_returns = self.wiki_message(wiki_graph, stock_features, self.wiki_encoder(wiki_graph.edata['feat']))
-        industry_returns = self.industry_message(industry_graph, stock_features, self.industry_encoder(industry_graph.edata['feat']))
-        correlation_returns = self.correlation_message(correlation_graph, stock_features, self.correlation_encoder(correlation_graph.edata['feat']))
-        stock_returns = torch.cat([wiki_returns, industry_returns, correlation_returns], dim=-1)
-        stock_returns = self.temporal_attn(stock_returns)
-        stock_returns = self.readout(stock_returns)
-        stock_returns = stock_returns / stock_features[:, -1, 0].unsqueeze(dim=-1) - 1   # Calculate return with last Close
-        
-        return stock_returns
-
-
 class FinSIRModel(nn.Module):
     def __init__(self, input_dim, wiki_dim, industry_dim, correlation_dim, hidden_dim, output_dim, 
                  recurrent_layers, recurrent_dropout, relational_agg, relational_dropout, readout_layers, readout_dropout):
         super(FinSIRModel, self).__init__()
+        _hidden_dim = (1 + int(relational_agg == 'gated')) * hidden_dim 
         self.wiki_encoder = nn.Linear(wiki_dim, 2 * input_dim, bias=False)
-        self.wiki_message = SIREConvBase(MessageFunction(2 * input_dim, hidden_dim, recurrent_layers, recurrent_dropout), relational_agg)
+        self.wiki_message = SIREConvBase(MessageFunction(2 * input_dim, _hidden_dim, recurrent_layers, recurrent_dropout), relational_agg)
         self.industry_encoder = nn.Linear(industry_dim, 2 * input_dim, bias=False)
-        self.industry_message = SIREConvBase(MessageFunction(2 * input_dim, hidden_dim, recurrent_layers, recurrent_dropout), relational_agg)
+        self.industry_message = SIREConvBase(MessageFunction(2 * input_dim, _hidden_dim, recurrent_layers, recurrent_dropout), relational_agg)
         self.correlation_encoder = nn.Linear(correlation_dim, 2 * input_dim, bias=False)
-        self.correlation_message = SIREConvBase(MessageFunction(2 * input_dim, hidden_dim, recurrent_layers, recurrent_dropout), relational_agg)
+        self.correlation_message = SIREConvBase(MessageFunction(2 * input_dim, _hidden_dim, recurrent_layers, recurrent_dropout), relational_agg)
+        # self.residual_func = MessageFunction(input_dim + 3 * hidden_dim, 3 * hidden_dim, recurrent_layers, recurrent_dropout)
         self.temporal_attn = TemporalAttention(3 * hidden_dim)
         self.readout = MLP(3 * hidden_dim, hidden_dim, output_dim, readout_layers, readout_dropout, nn.LeakyReLU(0.2, inplace=True))
         
@@ -167,6 +144,7 @@ class FinSIRModel(nn.Module):
         industry_returns = self.industry_message(industry_graph, stock_features, self.industry_encoder(industry_graph.edata['feat']))
         correlation_returns = self.correlation_message(correlation_graph, stock_features, self.correlation_encoder(correlation_graph.edata['feat']))
         stock_returns = torch.cat([wiki_returns, industry_returns, correlation_returns], dim=-1)
+        # stock_returns = self.residual_func(stock_returns) # concat stock_features
         stock_returns = self.temporal_attn(stock_returns)
         stock_returns = self.readout(stock_returns)
         stock_returns = stock_returns / stock_features[:, -1, 0].unsqueeze(dim=-1) - 1   # Calculate return with last Close
@@ -181,17 +159,19 @@ class RecurrentFinSIRModel(nn.Module):
         self.message_func = MessageFunction(input_dim, hidden_dim, recurrent_layers, recurrent_dropout)
         self.wiki_message = SIREConv(hidden_dim, wiki_dim, hidden_dim, hidden_dim, nn.LeakyReLU(0.2, inplace=True), relational_dropout, agg_type=relational_agg)
         self.industry_message = SIREConv(hidden_dim, industry_dim, hidden_dim, hidden_dim, nn.LeakyReLU(0.2, inplace=True), relational_dropout, agg_type=relational_agg)
-        self.correlation_message = SIREConv(hidden_dim, correlation_dim, hidden_dim, hidden_dim, nn.LeakyReLU(0.2, inplace=True), relational_dropout, agg_type=relational_agg)        
+        self.correlation_message = SIREConv(hidden_dim, correlation_dim, hidden_dim, hidden_dim, nn.LeakyReLU(0.2, inplace=True), relational_dropout, agg_type=relational_agg)
+        # self.residual_func = MessageFunction(4 * hidden_dim, 4 * hidden_dim, recurrent_layers, recurrent_dropout)
         self.temporal_attn = TemporalAttention(4 * hidden_dim)
         self.readout = MLP(4 * hidden_dim, hidden_dim, output_dim, readout_layers, readout_dropout, nn.LeakyReLU(0.2, inplace=True))
         
     def forward(self, wiki_graph, industry_graph, correlation_graph, stock_features):
         stock_features = stock_features / torch.mean(stock_features, dim=1, keepdim=True)
         stock_returns = self.message_func(stock_features)
-        wiki_returns = torch.stack([self.wiki_message(wiki_graph, stock_returns[:, t], wiki_graph.edata['feat']) for t in range(stock_returns.shape[1])], dim=1)
-        industry_returns = torch.stack([self.industry_message(industry_graph, stock_returns[:, t], industry_graph.edata['feat']) for t in range(stock_returns.shape[1])], dim=1)
-        correlation_returns = torch.stack([self.correlation_message(correlation_graph, stock_returns[:, t], correlation_graph.edata['feat']) for t in range(stock_returns.shape[1])], dim=1)
+        wiki_returns = torch.stack([self.wiki_message(wiki_graph, stock_returns[:, t, :], wiki_graph.edata['feat']) for t in range(stock_returns.shape[1])], dim=1)
+        industry_returns = torch.stack([self.industry_message(industry_graph, stock_returns[:, t, :], industry_graph.edata['feat']) for t in range(stock_returns.shape[1])], dim=1)
+        correlation_returns = torch.stack([self.correlation_message(correlation_graph, stock_returns[:, t, :], correlation_graph.edata['feat']) for t in range(stock_returns.shape[1])], dim=1)
         stock_returns = torch.cat([stock_returns, wiki_returns, industry_returns, correlation_returns], dim=-1)
+        # stock_returns = self.residual_func(stock_returns)
         stock_returns = self.temporal_attn(stock_returns)
         stock_returns = self.readout(stock_returns)
         stock_returns = stock_returns / stock_features[:, -1, 0].unsqueeze(dim=-1) - 1   # Calculate return with last Close

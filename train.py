@@ -65,8 +65,8 @@ def mrr_fn(preds, targets, k=1):
 
 def irr_fn(preds, targets, k=1):
     assert preds.shape == targets.shape
-    preds_rank = torch.sort(preds, descending=True, dim=0)[1]
-    investment_return = torch.mean(targets[preds_rank[:k]])
+    preds_rank = torch.sort(preds, descending=True, dim=0)[1].squeeze()
+    investment_return = torch.mean(targets[preds_rank[:k]].squeeze())
     return investment_return
 
 def train(model, dataset, train_loader, device, optimizer, scaler, args):
@@ -180,16 +180,16 @@ if __name__ == '__main__':
     argparser.add_argument('--corr-graph-thresh', type=float, default=0.9, help='threshold for correlation graph') 
     argparser.add_argument('--add-self-loop', action='store_true', help='add self-loop to relational graphs')
     
-    argparser.add_argument('--model', type=str, default='FinSIR', help='model name', choices=['Gated', 'FinSIR', 'Recurrent', 'Simple', 'Baseline']) 
+    argparser.add_argument('--model', type=str, default='FinSIR', help='model name', choices=['FinSIR', 'Recurrent', 'Simple', 'Baseline']) 
     argparser.add_argument('--nhidden', type=int, default=16, help='number of hidden units')
     argparser.add_argument('--recurrent-layers', type=int, default=1, help='number of layers for recurrent message function')
     argparser.add_argument('--recurrent-dropout', type=float, default=0, help='dropout rate for recurrent message function')
-    argparser.add_argument('--relational-agg', type=str, default='sum', help='aggregation type for relational convolution', choices=['sum', 'max', 'mean', 'sym'])
+    argparser.add_argument('--relational-agg', type=str, default='sum', help='aggregation type for relational convolution', choices=['sum', 'max', 'mean', 'sym', 'gated'])
     argparser.add_argument('--relational-dropout', type=float, default=0, help='dropout rate for relational convolution')
     argparser.add_argument('--readout-layers', type=int, default=1, help='number of layers for readout function')
     argparser.add_argument('--readout-dropout', type=float, default=0, help='dropout rate for readout function')
     
-    argparser.add_argument('--epochs', type=int, default=100, help='number of epochs')
+    argparser.add_argument('--epochs', type=int, default=50, help='number of epochs')
     argparser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
     argparser.add_argument('--wd', type=float, default=0, help='weight decay')
     argparser.add_argument('--l1', type=float, default=0, help='weight for L1 regularization')
@@ -201,7 +201,7 @@ if __name__ == '__main__':
     argparser.add_argument('--k-list', type=str, default='1 5 10', help='list of k values for MRR and IRR evaluation')
     
     argparser.add_argument('--nruns', type=int, default=10, help='number of runs')
-    argparser.add_argument('--log-every', type=int, default=20, help='log every LOG_EVERY epochs')
+    argparser.add_argument('--log-every', type=int, default=10, help='log every LOG_EVERY epochs')
     args = argparser.parse_args()
     
     # Process string list inputs
@@ -225,7 +225,7 @@ if __name__ == '__main__':
         correlation_dim = len(args.corr_graph_periods) + 1
         
         # Load model
-        Model = {'Gated': GatedFinSIRModel, 'FinSIR': FinSIRModel, 'Recurrent': RecurrentFinSIRModel, 'Simple': SimpleFinSIRModel, 'Baseline': BaselineModel}
+        Model = {'FinSIR': FinSIRModel, 'Recurrent': RecurrentFinSIRModel, 'Simple': SimpleFinSIRModel, 'Baseline': BaselineModel}
         model = Model[args.model](input_dim, wiki_dim, industry_dim, correlation_dim, args.nhidden, 1, 
                                   args.recurrent_layers, args.recurrent_dropout, args.relational_agg, args.relational_dropout,
                                   args.readout_layers, args.readout_dropout).to(device)

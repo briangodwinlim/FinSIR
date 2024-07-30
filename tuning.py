@@ -16,7 +16,7 @@ class Arguments:
 
 def run(config):
     args = Arguments(**config, nworkers=4, use_amp=True, market=market, return_period=1, l1=0, l2=0, k_list=[1, 5, 10])
-    args.corr_graph_periods = [int(p) for p in args.corr_graph_periods.split(' ')]    
+    args.corr_graph_periods = [int(p) for p in args.corr_graph_periods.split(' ')]
     
     # Change directory
     os.chdir(os.path.join(base_path, 'FinSIR/'))
@@ -26,7 +26,7 @@ def run(config):
 
     # Load dataset
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-    dataset, train_loader, val_loader, _ = tr.load_dataset(args.market, args)
+    dataset, train_loader, val_loader, test_loader = tr.load_dataset(args.market, args)
     
     # Extract input shapes
     input_dim = dataset[0][1].shape[-1]
@@ -60,6 +60,7 @@ def run(config):
         loss = tr.train(model, dataset, train_loader, device, optimizer, scaler, args)
         mse, mrr, irr = tr.evaluate(model, dataset, train_loader, device, args)
         val_mse, val_mrr, val_irr = tr.evaluate(model, dataset, val_loader, device, args)
+        test_mse, test_mrr, test_irr = tr.evaluate(model, dataset, test_loader, device, args)
         scheduler.step(loss)
 
         if val_irr[1] > best_val_irr_1:
@@ -68,6 +69,9 @@ def run(config):
                 'val_mse': val_mse,
                 'val_mrr': val_mrr,
                 'val_irr': val_irr,
+                'test_mse': test_mse,
+                'test_mrr': test_mrr,
+                'test_irr': test_irr,
             }
 
         os.makedirs('logs/models', exist_ok=True)
@@ -75,7 +79,9 @@ def run(config):
         checkpoint = train.Checkpoint.from_directory('logs/models')
         train.report({'loss': loss, 'mse': mse, 'mrr_1': mrr[1], 'mrr_5': mrr[5], 'mrr_10': mrr[10], 'irr_1': irr[1], 'irr_5': irr[5], 'irr_10': irr[10],
                       'val_mse': val_mse, 'val_mrr_1': val_mrr[1], 'val_mrr_5': val_mrr[5], 'val_mrr_10': val_mrr[10], 'val_irr_1': val_irr[1], 'val_irr_5': val_irr[5], 'val_irr_10': val_irr[10],
-                      'best_val_irr_1': result['val_irr'][1], 'best_val_irr_5': result['val_irr'][5], 'best_val_irr_10': result['val_irr'][10]}, checkpoint=checkpoint)
+                      'test_mse': test_mse, 'test_mrr_1': test_mrr[1], 'test_mrr_5': test_mrr[5], 'test_mrr_10': test_mrr[10], 'test_irr_1': test_irr[1], 'test_irr_5': test_irr[5], 'test_irr_10': test_irr[10],
+                      'best_val_irr_1': result['val_irr'][1], 'best_val_irr_5': result['val_irr'][5], 'best_val_irr_10': result['val_irr'][10],
+                      'best_test_irr_1': result['test_irr'][1], 'best_test_irr_5': result['test_irr'][5], 'best_test_irr_10': result['test_irr'][10]}, checkpoint=checkpoint)
 
 
 if __name__ == '__main__':
@@ -84,11 +90,11 @@ if __name__ == '__main__':
         'corr_graph_periods': tune.choice(['5 20', '5 30', '10 20', '10 30']),
         'corr_graph_thresh': tune.choice([0.8, 0.9]),
         'add_self_loop': tune.choice([True, False]),
-        'nhidden': tune.choice([4, 8, 16, 32]),
+        'nhidden': tune.choice([4, 8, 16, 32, 64]),
         'recurrent_layers': tune.choice([1, 2]),
         'recurrent_dropout': tune.choice([0.0, 0.1, 0.2, 0.4]),
-        'relational_agg': tune.choice(['sum', 'mean', 'sym', 'max']),
-        'relational_dropout': tune.choice([0.0]),
+        'relational_agg': tune.choice(['sum', 'max', 'mean', 'sym', 'gated']),
+        'relational_dropout': tune.choice([0.0, 0.1, 0.2, 0.4]),
         'readout_layers': tune.choice([1, 2]),
         'readout_dropout': tune.choice([0.0, 0.1, 0.2, 0.4]),
         'lr': tune.choice([1e-4, 1e-3]),
@@ -108,18 +114,18 @@ if __name__ == '__main__':
     
     search_alg = OptunaSearch(points_to_evaluate=hyperparams)
     # search_alg.restore_from_dir(os.path.join(directory, exp_name))
-    search_alg = ConcurrencyLimiter(search_alg, max_concurrent=1)
+    search_alg = ConcurrencyLimiter(search_alg, max_concurrent=6)
     scheduler = ASHAScheduler(max_t=50, grace_period=20)
     
     if tune.Tuner.can_restore(os.path.join(directory, exp_name)):
         tuner = tune.Tuner.restore(
             path=os.path.join(directory, exp_name), 
-            trainable=tune.with_resources(tune.with_parameters(run), resources={'cpu': 24, 'gpu': 1}),
+            trainable=tune.with_resources(tune.with_parameters(run), resources={'cpu': 6, 'gpu': 1/6, 'accelerator_type:RTX': 1/6}),
             resume_unfinished=True,
         )
     else:
         tuner = tune.Tuner(
-            trainable=tune.with_resources(tune.with_parameters(run), resources={'cpu': 24, 'gpu': 1}),
+            trainable=tune.with_resources(tune.with_parameters(run), resources={'cpu': 6, 'gpu': 1/6, 'accelerator_type:RTX': 1/6}),
             tune_config=tune.TuneConfig(mode='max', metric='best_val_irr_1', search_alg=search_alg, scheduler=scheduler, num_samples=100),
             run_config=train.RunConfig(name=exp_name, storage_path=directory, failure_config=train.FailureConfig(max_failures=2), 
                                        checkpoint_config=train.CheckpointConfig(num_to_keep=1)),
@@ -129,4 +135,4 @@ if __name__ == '__main__':
     best_result = results.get_best_result()
 
     print(f'Best trial config: {best_result.config}')
-    print(f'Best trial val irr_1: {best_result.metrics["best_val_irr_1"]}')
+    print(f'Best trial test irr_1: {best_result.metrics["best_test_irr_1"]}')
